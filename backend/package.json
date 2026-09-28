@@ -1,0 +1,19 @@
+{
+  "name": "irigasi-digital-twin-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "API Digital Twin Irigasi (kerangka): data jaringan, dan nanti telemetri dari SimHidro",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

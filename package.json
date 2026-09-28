@@ -1,0 +1,24 @@
+{
+  "name": "irigasi-digital-twin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Digital Twin Irigasi — D.I. Leuwigoong (Bendung Copong, Garut): jaringan 3D, telemetri, bukaan pintu, dan neraca air",
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace backend run dev",
+    "dev:web": "npm --workspace frontend run dev",
+    "build": "npm --workspace frontend run build",
+    "preview": "npm --workspace frontend run preview",
+    "start": "npm --workspace backend run start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
