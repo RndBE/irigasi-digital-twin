@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp } from '../lib/format';
+import { clamp, smooth } from '../lib/format';
 import { STATIONS, STMAP } from '../domain/stations';
 import { sim } from '../domain/state';
 import { gateSpec, type GateLevels, type GateSpec } from '../domain/gateSpec';
@@ -42,7 +42,7 @@ function gmMat(): GmMaterials {
     red: P({ color: C(0xc62828) }), rail: P({ color: C(0xf2c230), shininess: 30 }),
     water: new THREE.MeshPhongMaterial({ color: C(0x7cc4e6), map: tex.ripple, transparent: true, opacity: 0.82, shininess: 90, specular: 0x88aacc, depthWrite: false }),
     waterSide: new THREE.MeshLambertMaterial({ color: C(0x5aa8d4), transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide }),
-    foam: new THREE.MeshLambertMaterial({ color: 0xffffff, map: tex.foam, transparent: true, opacity: 0.8, depthWrite: false }),
+    foam: new THREE.MeshLambertMaterial({ color: 0xffffff, map: tex.foam, transparent: true, opacity: 0.8, depthWrite: false, vertexColors: true }),
     gauge: L({ map: gaugeTex() }), ghost: new THREE.MeshBasicMaterial({ color: 0xf2c230, transparent: true, opacity: 0.28, depthWrite: false }),
     lamp: ['#e53935', '#f9b000', '#1fae4b'].map(c => new THREE.MeshPhongMaterial({ color: C(0x333333), emissive: new THREE.Color(c).convertSRGBToLinear(), emissiveIntensity: 1 })),
   };
@@ -70,9 +70,10 @@ export interface GateRefs {
   wheels: THREE.Group[];
   lamps: THREE.Mesh[];
   stn?: Station;
-  wU: THREE.Mesh<THREE.BufferGeometry, Phong>; wD: THREE.Mesh<THREE.BufferGeometry, Phong>;
+  /** Muka air dari ujung hulu ke ujung hilir: stasiun `z`, dengan tangga di dalam pelat daun antara `zG0` dan `zG1`. */
+  w: { m: THREE.Mesh<THREE.BufferGeometry, Phong>; z: number[]; zG0: number; zG1: number };
   sU: THREE.Mesh; sD: THREE.Mesh;
-  jets: { m: THREE.Mesh<THREE.BufferGeometry, Lambert>; cx: number }[];
+  jets: { m: THREE.Mesh<THREE.BufferGeometry, Lambert>; x0: number; x1: number }[];
   /** Bukaan yang sedang ditampilkan (%), mendekati `target`. */
   cur: number; target: number; lv: GateLevels | null; draft: number | null;
 }
@@ -80,7 +81,8 @@ export interface GateRefs {
 export function buildGateModel(G: Gate): GateRefs {
   const M = gmMat(), sp = gateSpec(G), root = new THREE.Group();
   const bt = sp.leaves * sp.bw + (sp.leaves - 1) * sp.pier, W = 0.3, D = sp.depth, zL = 6;
-  const Hp = D + (sp.intake ? 1.2 : 1.1);
+  // deck high enough that a leaf at full opening (with the lifting lugs of a weir leaf) stays under it
+  const Hp = Math.max(D + (sp.intake ? 1.2 : 1.1), sp.leafH + sp.maxLift + (sp.weir ? 0.32 : 0.12));
   const leaves: GateRefs['leaves'] = [], rods: GateRefs['rods'] = [], wheels: THREE.Group[] = [], lamps: THREE.Mesh[] = [];
   // floor, side walls, wing walls, ground on both banks
   gmBox(root, M.concDark, bt + 2 * W, 0.25, 2 * zL, 0, -0.125, 0);
@@ -177,29 +179,68 @@ export function buildGateModel(G: Gate): GateRefs {
   for (const zz of [-1.2, 1.4]) { const g = new THREE.Mesh(new THREE.PlaneGeometry(0.14, Math.min(D, 2)), M.gauge); g.position.set(-bt / 2 + 0.002, Math.min(D, 2) / 2, zz); g.rotation.y = Math.PI / 2; root.add(g); }
   // trash rack in front of the intake
   if (sp.intake) { const rack = new THREE.Mesh(new THREE.PlaneGeometry(bt, D * 0.9), new THREE.MeshLambertMaterial({ map: S.tex.rack, alphaTest: 0.5, side: THREE.DoubleSide })); rack.position.set(0, D * 0.45, -2.2); rack.rotation.x = -0.25; root.add(rack); }
-  // water: surfaces, cut faces at both ends, jet under the leaves, foam
-  const wU = new THREE.Mesh(new THREE.PlaneGeometry(bt, zL - 0.04), M.water); wU.rotation.x = -Math.PI / 2; wU.position.set(0, 0.5, -zL / 2 - 0.02); root.add(wU);
-  const wD = new THREE.Mesh(new THREE.PlaneGeometry(bt, zL - 0.08), M.water.clone()); wD.material.map = S.tex.ripple.clone(); wD.material.map.needsUpdate = true; wD.rotation.x = -Math.PI / 2; wD.position.set(0, 0.3, zL / 2 + 0.04); root.add(wD);
+  // water: one surface from end to end, cut faces at both ends, foam on the jet under each leaf. The surface is level
+  // upstream, draws down toward the opening once the leaf clears the water, leaves the lip of the leaf and falls to
+  // the downstream level, so no floor shows between the two pools; the step at a closed or drowned leaf sits inside
+  // the leaf plate (zG0..zG1). Texture v runs downstream (+z), so the scrolling carries the ripples and the foam with
+  // the flow.
+  const zG0 = sp.intake ? -0.42 : -0.02, zG1 = 0.02;
+  const wz = [-zL, ...[4.6, 3.5, 2.6, 1.9, 1.4, 1, 0.7, 0.45, 0.25, 0.1, 0].map(d => zG0 - d), ...[0, 0.08, 0.18, 0.3, 0.45, 0.63, 0.85, 1.1, 1.4, 1.75, 2.15, 2.6, 3.2, 4, 5].map(d => zG1 + d), zL];
+  const w = { m: new THREE.Mesh(waterStrip(wz.length), M.water), z: wz, zG0, zG1 }; w.m.frustumCulled = false; root.add(w.m);
   const sU = new THREE.Mesh(new THREE.PlaneGeometry(bt, 1), M.waterSide); sU.position.set(0, 0.25, -zL + 0.001); root.add(sU);
   const sD = new THREE.Mesh(new THREE.PlaneGeometry(bt, 1), M.waterSide); sD.position.set(0, 0.15, zL - 0.001); root.add(sD);
-  const jets = bays.map(([x0, x1]) => { const j = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, 1), M.foam); j.rotation.x = -Math.PI / 2; root.add(j); return { m: j, cx: (x0 + x1) / 2 }; });
-  // telemetry pole when a station sits on this canal
+  const jets = bays.map(([x0, x1]) => { const j = new THREE.Mesh(waterStrip(FOAM_N, true), M.foam); j.frustumCulled = false; j.renderOrder = 1; root.add(j); return { m: j, x0, x1 }; });
+  // station on this canal: its reading shows beside the model, but no pole is drawn in the model
   const stn = sp.weir ? STMAP['AWLR-CPG-02'] : STATIONS.find(x => x.ri === G.ri && x.type !== 'ARR');
-  if (stn) {
-    const x = -(bt / 2 + W + 0.7), z = 2.6, arm = -x - bt * 0.25;
-    gmBox(root, M.conc, 0.6, 0.08, 0.6, x, D + 0.04, z);
-    gmCyl(root, M.steel, 0.05, 0.06, 2.6, x, D + 1.3, z); gmBox(root, M.white, 0.34, 0.44, 0.22, x - 0.05, D + 1.1, z - 0.16);
-    gmBox(root, M.iron, 0.68, 0.03, 0.46, x, D + 2.5, z - 0.1, -0.35); gmBox(root, M.steel, arm, 0.05, 0.05, x + arm / 2, D + 1.9, z);
-    gmCyl(root, M.white, 0.08, 0.1, 0.16, x + arm, D + 1.8, z);
-  }
-  return { root, spec: sp, bt, D, Hp, zL, leaves, rods, wheels, lamps, stn, wU, wD, sU, sD, jets, cur: sim.open[G.id], target: sim.open[G.id], lv: null, draft: null };
+  return { root, spec: sp, bt, D, Hp, zL, leaves, rods, wheels, lamps, stn, w, sU, sD, jets, cur: sim.open[G.id], target: sim.open[G.id], lv: null, draft: null };
 }
 
+/** Pita air memanjang aliran: dua titik (kiri, kanan) per stasiun, diisi ulang tiap bingkai oleh `gmSetWater`. */
+const FOAM_N = 11;
+function waterStrip(n: number, alpha = false) {
+  const g = new THREE.BufferGeometry(), idx: number[] = [];
+  for (let k = 0; k < n - 1; k++) { const a = 2 * k; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 6), 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * 6), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(n * 4), 2));
+  if (alpha) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 8).fill(1), 4));
+  g.setIndex(idx); return g;
+}
+
+/** Muka air sepanjang aliran untuk bukaan dan muka air hulu/hilir saat ini, dan buih jet di hilir tiap daun. */
 export function gmSetWater(refs: GateRefs, lv: GateLevels) {
-  const { hU, hD, a } = lv;
-  refs.wU.position.y = hU; refs.wD.position.y = hD;
+  const { hU, hD, a } = lv, { w } = refs, hb = refs.bt / 2;
+  // a leaf in the water holds the surface level up to its face; once it clears the water the surface draws down toward
+  // the opening. The water leaves the lip at the leaf edge (or the drawn-down level) and falls to the downstream level.
+  const free = smooth(0.75, 1.25, a / Math.max(0.01, hU)), dd = hU * 0.22 * free, yG = hU - dd, lip = Math.max(Math.min(a, yG), hD);
+  const Lu = 1.2 + hU * 0.4, Ld = clamp(0.35 + 1.4 * (lip - hD), 0.35, 3.2);
+  const y = (z: number) => z <= w.zG0 ? hU - dd * Math.max(0, 1 - (w.zG0 - z) / Lu) ** 2
+    : z < w.zG1 ? yG + (lip - yG) * (z - w.zG0) / (w.zG1 - w.zG0) : hD + (lip - hD) * (1 - smooth(0, Ld, z - w.zG1));
+  // slope for the normals, one-sided at the leaf faces so the step inside the plate does not tilt the pools
+  const e = 0.01, slope = (z: number) => z === w.zG0 ? (y(z) - y(z - e)) / e : z === w.zG1 ? (y(z + e) - y(z)) / e : (y(z + e) - y(z - e)) / (2 * e);
+  const g = w.m.geometry, P = g.attributes.position as THREE.BufferAttribute, N = g.attributes.normal as THREE.BufferAttribute, UV = g.attributes.uv as THREE.BufferAttribute;
+  // texture v grows with the depth, so the ripples stretch and run faster where the water gets shallow
+  let v = 0, yp = 0;
+  w.z.forEach((z, k) => {
+    const yy = y(z), s = slope(z), l = Math.hypot(1, s);
+    if (k) v += (z - w.z[k - 1]) * clamp((yy + yp) / 2 / Math.max(0.05, hU), 0.3, 1) / refs.zL;
+    yp = yy;
+    for (const j of [0, 1]) { P.setXYZ(2 * k + j, j ? hb : -hb, yy, z); N.setXYZ(2 * k + j, 0, 1 / l, -s / l); UV.setXY(2 * k + j, j, v); }
+  });
+  P.needsUpdate = N.needsUpdate = UV.needsUpdate = true;
   refs.sU.scale.y = Math.max(0.01, hU); refs.sU.position.y = hU / 2;
   refs.sD.scale.y = Math.max(0.01, hD); refs.sD.position.y = hD / 2;
+  // foam on the jet: strongest under a leaf in the water, thinner once the leaf is clear, fading out downstream
   const on = a > 0.004, len = clamp(0.6 + a * 3, 0.6, 2.4);
-  refs.jets.forEach(j => { j.m.visible = on; j.m.scale.y = len; j.m.position.set(j.cx, hD + 0.012, 0.05 + len / 2); j.m.material.opacity = clamp(0.25 + a * 1.5, 0.25, 0.9); });
+  if (refs.jets[0]) refs.jets[0].m.material.opacity = clamp(0.25 + a * 1.5, 0.25, 0.9) * (1 - 0.6 * free);
+  refs.jets.forEach(j => {
+    j.m.visible = on; if (!on) return;
+    const jg = j.m.geometry, JP = jg.attributes.position as THREE.BufferAttribute, JN = jg.attributes.normal as THREE.BufferAttribute;
+    const JU = jg.attributes.uv as THREE.BufferAttribute, JC = jg.attributes.color as THREE.BufferAttribute;
+    for (let k = 0; k < FOAM_N; k++) {
+      const f = k / (FOAM_N - 1), z = w.zG1 + 0.01 + f * len, yy = y(z) + 0.012, s = slope(z), l = Math.hypot(1, s), al = 1 - smooth(0.5, 1, f);
+      for (const i of [0, 1]) { const n = 2 * k + i; JP.setXYZ(n, i ? j.x1 : j.x0, yy, z); JN.setXYZ(n, 0, 1 / l, -s / l); JU.setXY(n, i, f * len / 1.2); JC.setW(n, al); }
+    }
+    JP.needsUpdate = JN.needsUpdate = JU.needsUpdate = JC.needsUpdate = true;
+  });
 }

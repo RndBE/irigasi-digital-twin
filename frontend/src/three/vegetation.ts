@@ -103,6 +103,14 @@ export function buildTrees() {
   inst(S.G.bambooTop, M.leaf, bamboo, () => col(0.19 + rnd() * 0.04, 0.42 + rnd() * 0.12, 0.25 + rnd() * 0.06), true);
   inst(S.G.pineTrunk, M.trunk, pine, null, false);
   inst(S.G.pine, M.leaf, pine, () => col(0.3 + rnd() * 0.05, 0.28 + rnd() * 0.12, 0.13 + rnd() * 0.05), true);
+  // trees round Situ Bagendit, laid out with the lake and coloured with their own generator, so the shared random
+  // stream stays the same
+  const lk = T3.lakeTrees || [];
+  let sd = 0x71c3a95d;
+  const lr = () => (sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const lb = lk.filter(t => !t.palm), lp = lk.filter(t => t.palm);
+  inst(S.G.broadTrunk, M.trunk, lb, null, true); inst(S.G.broad, M.leaf, lb, () => col(0.22 + lr() * 0.09, 0.34 + lr() * 0.2, 0.15 + lr() * 0.1), true);
+  inst(S.G.palmTrunk, M.trunk, lp, null, true); inst(S.G.palmCrown, M.palmLeaf, lp, () => col(0.2 + lr() * 0.05, 0.4 + lr() * 0.15, 0.22 + lr() * 0.07), true);
 }
 export function buildBackdrop() {
   const cx = T3.maxX / 2, cz = T3.maxZ / 2;

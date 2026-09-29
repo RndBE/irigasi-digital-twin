@@ -24,7 +24,10 @@ export function groundInfo(x: number, z: number): GroundInfo {
   const rc = riverX(z), hw = riverHW(z), d = Math.abs(x - rc), t = d - hw, wl = waterLevel(z);
   if (x > K.x0 && x < K.x1 && z > K.z0 && z < K.z1) return { y: -0.03, kind: 'kl', t, base, hill, wl };
   if (z > T3.zA && z < T3.zB) {
-    if (d < WEIR_HW) return { y: z < zw ? -0.85 : -1.5, kind: 'bed', t, base, hill, wl };
+    // along the intake wall the bed runs on under its face, so the bank slope sits inside the concrete instead of
+    // covering the gate openings
+    const intakeFace = x > rc && z > K.z0 && z < K.z1 && d < WEIR_HW + 0.015;
+    if (d < WEIR_HW || intakeFace) return { y: z < zw ? -0.85 : -1.5, kind: 'bed', t, base, hill, wl };
     const y = platY(x, z, d);
     return { y: Math.max(base, y), kind: y > LV.levee - 0.05 ? 'plat' : 'grass', t, base, hill, wl };
   }

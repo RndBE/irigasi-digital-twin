@@ -65,6 +65,7 @@ frontend/src/
 │   ├── TwinView.tsx      pembungkus React + tombol sudut pandang dan lapisan
 │   ├── weir.ts, canals.ts, river.ts, terrain.ts, sensors.ts, roads.ts, villages.ts, vegetation.ts
 │   ├── labels.ts, sync.ts   label HTML di adegan; salin keadaan simulasi ke adegan
+│   ├── weather.ts        riak Sungai Cimanuk menurut debit, hujan (garis miring, percikan di sungai), badai dan kilat
 │   ├── gateModel.ts, gateViewer.ts   model 3D satu pintu untuk jendela detail
 │   └── context.ts, layout.ts, geometry.ts, textures.ts, materials.ts, occupancy.ts, props.ts
 ├── components/           Sidebar, TopBar, PageHead, Kpi, Rail, DetailPanel, GateControl, GateModal, CrossSection, Ui
@@ -120,6 +121,22 @@ Saat pengembangan, `window.__twin` di konsol peramban memberi akses ke adegan (`
 - **Halaman rumah operasi bendung.** Di tepi intake, hilir kantong lumpur, pelataran bendung hanya rata sampai 7,5 unit dari as sungai. Setelah itu tanahnya melandai ke muka tanah (`platY` di `three/terrain.ts`), sehingga rumah operasi, jalan masuk, parkir, dan papan nama berdiri di tanah rata.
   - Di belakang tembok sayap hilir, timbunan pelataran ikut melandai, jadi tidak ada tebing tegak lagi.
   - Jalan menapak pada tanah tertinggi di sepanjang lebarnya, jadi tidak tertembus lereng.
+
+- **Persilangan jalan dengan saluran.** Di tiap persilangan dibangun jembatan pelat pendek dan timbunan oprit (`three/roads.ts`):
+  - pelat dan balok tepi di atas saluran, tembok sandaran dengan tiang ujung di atas tanggul;
+  - timbunan berumput dengan bahu kerikil yang membawa jalan naik ke tanggul dan turun lagi sampai muka tanah;
+  - mobil tidak diletakkan di jembatan atau oprit, dan berdiri di permukaan aspal.
+
+- **Riak sungai dan hujan.** `three/weather.ts` mengatur permukaan Sungai Cimanuk dari debitnya:
+  - **kemarau:** tenang seperti kaca, lambat, dan agak jernih;
+  - **normal:** beriak sedang;
+  - **banjir:** ombak lebar dan kasar, deras, keruh kecokelatan, dan buih makin tebal.
+
+  Riak memakai dua lapis peta normal ombak yang bergerak dengan kecepatan dan arah berbeda. Nilainya berpindah pelan saat skenario diganti.
+  - Hujan digambar sebagai garis jatuh yang miring tertiup angin. Makin lebat, makin rapat dan panjang garisnya, dan tiap tetes memercik lingkaran di muka sungai.
+  - Hujan lebat menggelapkan langit dan merapatkan kabut. Pada hujan tersebut, sesekali ada kilat.
+  - Dari kamera jauh, garis hujan ditipiskan supaya jaringan tetap terbaca.
+  - Skenario banjir kini hujan lebat sepanjang waktu, sekitar 8–32 mm/jam.
 
 - **Tampilan.** Mengikuti dasbor demo Beacon (be-jogja.com/demo): palet navy (selalu gelap), font Plus Jakarta Sans dan JetBrains Mono, logo Beacon Engineering putih langsung di atas navy. Diorama 3D tetap mengikuti preferensi terang/gelap sistem operasi: gelap menjadi suasana senja dengan lampu menyala, terang menjadi siang.
 

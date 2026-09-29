@@ -7,11 +7,13 @@ import { stStatus } from '../domain/simulation';
 import type { OpenMap, SceneView, Sel, Snapshot } from '../domain/types';
 import { C, S, T3, kRGB } from './context';
 import { lineMid } from './layout';
+import { setRiverFlow } from './weather';
 
 /** Salin keadaan simulasi ke adegan: warna dan aliran air, warna petak, pintu, muka air bendung, lampu stasiun. */
 const lerpHex = (a: number, b: number, f: number) => new THREE.Color(a).lerp(new THREE.Color(b), clamp(f, 0, 1));
 const waterColor = (K: number, flow: boolean) => (flow ? (K >= 0.9 ? new THREE.Color(0x3f6d68) : lerpHex(0x94794c, 0x3f6d68, (K - 0.45) / 0.45)) : new THREE.Color(0x76674a)).convertSRGBToLinear();
 const SENSOR_COL = { good: 0x1fae4b, warn: 0xf2a900, crit: 0xd03b3b, serious: 0x6d7476 };
+const DRY = new THREE.Matrix4().makeScale(0, 0, 0);
 
 export function syncScene(view: SceneView, open: OpenMap, cs: Snapshot, sel: Sel | null) {
   if (!S.ready) return;
@@ -29,11 +31,21 @@ export function syncScene(view: SceneView, open: OpenMap, cs: Snapshot, sel: Sel
   for (let k = 0; k < S.plotOf.length; k++) {
     const m = S.plotOf[k], rgb = kRGB(Kt[m]), f = S.plotVary[k] * (m === selR || R[m].grp === grpSel ? 1.16 : 1);
     col.setRGB(Math.min(1, rgb[0] * f), Math.min(1, rgb[1] * f), Math.min(1, rgb[2] * f)).convertSRGBToLinear(); S.plots.setColorAt(k, col);
+    S.plotShells?.forEach(m => m.setColorAt(k, col));
   }
   S.plots.instanceColor!.needsUpdate = true;
-  const flood = clamp((view.Qriver - 40) / 70, 0, 1);
-  S.M.river.color.copy(lerpHex(0x6c6749, 0x86623e, flood).convertSRGBToLinear());
-  S.riverSpeed = 0.25 + clamp(view.Qriver / 30, 0, 4);
+  S.plotShells?.forEach(m => { m.instanceColor!.needsUpdate = true; });
+  // offtakes: water in the box, chute, basin, quarter ditch and paddy inlets only while the tertiary gets water
+  if (S.offtakes) {
+    const o = S.offtakes; let dirty = false;
+    o.m.forEach((m, k) => {
+      const on = (Q[m] || 0) > 0.0005; if (on === o.on[k]) return;
+      o.on[k] = on; dirty = true; o.parts.forEach(p => p.idx[k].forEach(j => p.mesh.setMatrixAt(j, on ? p.base[j] : DRY)));
+    });
+    if (dirty) o.parts.forEach(p => { p.mesh.instanceMatrix.needsUpdate = true; });
+  }
+  // ripples, flow speed and colour of the Cimanuk follow its discharge (dry season, normal, flood) and the rain
+  setRiverFlow(view.Qriver, clamp(view.rain / 22, 0, 1));
   const qs = Math.max(0, view.Qriver - (cs.Qin || 0));
   // weir gates at the operator's openings, jets by the flow through each gate, pond level from the weir balance
   const wq = view.wq || [0, 0, 0, 0];
@@ -42,8 +54,13 @@ export function syncScene(view: SceneView, open: OpenMap, cs: Snapshot, sel: Sel
   if (view.H != null) S.pondY = clamp((view.H - 3.26) * 0.2057, -1.1, 0.4);
   if (S.inJet) { const q = view.Q ? view.Q[ROOT] : 0; S.inJet.opacity = q < 0.02 ? 0 : clamp(0.22 + q / 2.4 * 0.45, 0.22, 0.7); }
   if (S.klJet) { const q = view.Q ? view.Q[ROOT] : 0; S.klJet.opacity = q < 0.02 ? 0 : clamp(0.12 + q / 2.4 * 0.33, 0.12, 0.45); }
+  // inflow at the river face of the intake: flow lines and drawdown by the intake discharge, gone when it is shut
+  if (S.intakeFlow) {
+    const q = view.Q ? view.Q[ROOT] : 0, k = clamp(q / 2.4, 0, 1.5), f = S.intakeFlow;
+    f.g.visible = q >= 0.02; f.streak.opacity = 0.18 + 0.32 * k; f.dip.opacity = 0.1 + 0.2 * k; f.speed = 0.3 + 0.7 * k;
+    f.foam.opacity = q < 0.02 ? 0 : 0.2 + 0.35 * k;
+  }
   S.M.foam.opacity = clamp(0.16 + qs / 90, 0.16, 0.85); S.foamMat2.opacity = clamp(0.05 + qs / 200, 0.05, 0.5);
-  S.rainLevel = clamp(view.rain / 22, 0, 1);
   STATIONS.forEach(stn => {
     const m = S.sensors[stn.id]; if (!m) return;
     const [lvl] = stStatus(stn, cs), c = C(SENSOR_COL[lvl] || SENSOR_COL.good);

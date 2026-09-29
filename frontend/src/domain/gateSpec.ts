@@ -31,7 +31,8 @@ export function gateSpec(G: Gate): GateSpec {
   const motor = intake || r.type === 'P';
   const b = intake ? 3.0 : r.b > 0.05 ? r.b : r.type === 'S' ? 1.0 : r.type === 'U' ? 0.8 : 0.5;
   const h = intake ? 1.15 : r.h > 0.05 ? r.h : r.type === 'T' ? 0.35 : 0.6;
-  const leaves = intake ? 3 : b > 1.6 ? 2 : 1, bw = leaves > 1 && !intake ? (b - 0.3) / 2 : b;
+  // one leaf across the whole width for every canal gate, three for the intake
+  const leaves = intake ? 3 : 1, bw = b;
   const depth = intake ? 3.0 : h + 0.35;
   const leafH = intake ? h + 0.3 : Math.min(depth, h + 0.2);          // intake: 1,15 m opening under a breast wall
   return { r, intake, motor, b, h, leaves, bw, depth, leafH, pier: 0.3, maxLift: G.maxCm / 100 };

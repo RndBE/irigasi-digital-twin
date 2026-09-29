@@ -34,9 +34,9 @@ export function createGateViewer(host: HTMLElement): GateViewer {
   const resize = () => { const w = host.clientWidth, hh = host.clientHeight; if (!w || !hh) return; renderer.setSize(w, hh); camera.aspect = w / hh; camera.updateProjectionMatrix(); };
   new ResizeObserver(resize).observe(host);
 
-  // pegangan debug saat pengembangan: window.__gateView.camera / .controls
-  if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__gateView = { camera, controls };
   let refs: GateRefs | null = null, running = false, last = performance.now();
+  // pegangan debug saat pengembangan: window.__gateView.camera / .controls / .refs, .frame(t) satu bingkai
+  if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__gateView = { camera, controls, renderer, scene, get refs() { return refs; }, frame: (now: number) => frame(now) };
   const frame = (now: number) => {
     if (!running) return;
     requestAnimationFrame(frame);
@@ -50,7 +50,7 @@ export function createGateViewer(host: HTMLElement): GateViewer {
     r.wheels.forEach(w => { w.rotation.z += spin; });
     gmSetWater(r, { ...r.lv!, a });
     const flow = clamp(a * 4, 0.05, 1.5);
-    r.wU.material.map!.offset.y -= dt * 0.15 * flow; r.wD.material.map!.offset.y -= dt * 0.45 * flow; S.tex.foam.offset.y -= dt * 0.6;
+    r.w.m.material.map!.offset.y -= dt * 0.15 * flow; S.tex.foam.offset.y -= dt * 0.6;
     controls.update();
     renderer.render(scene, camera);
   };

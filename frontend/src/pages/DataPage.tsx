@@ -1,5 +1,6 @@
 import { nf } from '../lib/format';
 import { AREA_T, B, DATA, GROUPS, R, SOURCES } from '../domain/network';
+import { STATIONS } from '../domain/stations';
 import { Chip } from '../components/Ui';
 import { PageHead } from '../components/PageHead';
 import { RowLink } from './TelemetryPage';
@@ -32,26 +33,26 @@ export function DataPage() {
           <div className="panel"><h3>Dari data nyata</h3><ul className="srcs">
             <li><b>Jaringan:</b> {tot} ruas, {nf(km, 1)} km (primer, sekunder, suplesi, tersier) dari layer SISDA BBWS Cimanuk-Cisanggarung. Topologi dirapikan: {fx.length - 1} ruas yang terputus di data notebook kini tersambung, dan arah Suplesi Citameng III dibalik.</li>
             <li><b>Bendung Copong:</b> bendung {B.tipe.toLowerCase()} di S. Cimanuk, Ds. {B.desa}, Kec. {B.kec}; mercu {nf(B.mercu_m, 0)} m, tinggi {nf(B.tinggi_m, 1)} m, elevasi mercu +{nf(B.el_mercu, 2)} mdpl, intake {B.intake}, Q rencana {nf(B.q_rencana)} m³/s, kantong lumpur {nf(B.kantong_lumpur_m, 0)} m, luas baku {nf(B.luas_baku, 0)} ha.</li>
-            <li><b>Sumber air lain:</b> {SOURCES.filter(s => s.kind === 'lokal').map(s => s.name).join(', ')} (sistem sendiri) dan suplesi dari {SOURCES.filter(s => s.kind === 'suplesi').map(s => s.name).join(' dan ')}; titiknya dari layer bangunan SISDA.</li>
+            <li><b>Sumber air lain:</b> {SOURCES.some(s => s.kind === 'lokal') ? <>{SOURCES.filter(s => s.kind === 'lokal').map(s => s.name).join(', ')} (sistem sendiri) dan </> : null}suplesi dari {SOURCES.filter(s => s.kind === 'suplesi').map(s => s.name).join(' dan ')}; titiknya dari layer bangunan SISDA. Sistem Bendung Cipacing, Genteng Cipacing, dan Pangkalan tidak dimasukkan karena berdiri sendiri di luar layanan Bendung Copong.</li>
             <li><b>Kebutuhan air:</b> per ruas tersier dari notebook WMS (FAO-56 Penman-Monteith, cuaca ERA5-Land 2015–2025, rezim FL, tanam Januari). Luas terlayani {nf(AREA_T, 0)} ha dalam {GROUPS.length} kelompok layanan.</li>
             <li><b>Hidraulik per ruas:</b> dimensi rencana b × h, talud, Manning n, kemiringan, kecepatan, bilangan Froude, dan waktu tempuh air dari notebook.</li>
             <li><b>Sawah:</b> poligon BIG RBI 25K (Agrikultur Sawah), dipetak 200 m; petak ≤ 750 m dari tersier dihitung terlayani.</li>
             <li><b>Sungai, situ, dan {DATA.bangunan.length} titik bangunan irigasi:</b> layer SISDA. <b>Medan:</b> Copernicus DEM GLO-90 (Open-Meteo), grid {DATA.dem.n} × {DATA.dem.n}.</li>
           </ul></div>
           <div className="panel"><h3>Simulasi untuk demo</h3><ul className="srcs">
-            <li>Debit Sungai Cimanuk dan sungai kecil di bendung lokal (Cipacing, Genteng Cipacing, Pangkalan, Citameng) per skenario.</li>
+            <li>Debit Sungai Cimanuk dan sungai kecil sumber suplesi (Citameng) per skenario.</li>
             <li>Bukaan pintu awal (dibuat tidak seimbang supaya terlihat masalah hulu-hilir).</li>
             <li>Model pembagian air: proporsional terhadap kapasitas dan bukaan pintu, dengan jeda waktu tempuh air per ruas.</li>
-            <li>Lokasi 16 stasiun telemetri (dipilih di titik bangunan nyata), nilai baterai, sinyal, dan alarm.</li>
+            <li>Lokasi {STATIONS.length} stasiun telemetri (dipilih di titik bangunan nyata), nilai baterai, sinyal, dan alarm.</li>
           </ul></div>
         </div>
       </div>
 
       <div>
-        <div className="sect-h"><h2>Perbaikan topologi jaringan</h2><p>Di data notebook, 26 ruas tidak tersambung ke SI Copong. Tiap ruas dicek terhadap geometri dan titik bangunan SISDA, lalu disambung. Klik baris untuk melihat ruasnya di twin.</p></div>
+        <div className="sect-h"><h2>Perbaikan topologi jaringan</h2><p>Di data notebook, {fx.length - 1} ruas tidak tersambung ke SI Copong. Tiap ruas dicek terhadap geometri dan titik bangunan SISDA, lalu disambung. Klik baris untuk melihat ruasnya di twin.</p></div>
         <div className="fixsum">
           <Chip lvl="good">{cnt('tersambung')} disambung, celah ≤ 40 m</Chip><Chip lvl="warn">{cnt('perlu verifikasi')} perlu cek lapangan</Chip>
-          <Chip lvl="good">{cnt('sumber lokal')} akar sistem bendung lokal</Chip><Chip lvl="good">{cnt('suplesi')} saluran suplesi</Chip>
+          {cnt('sumber lokal') > 0 && <Chip lvl="good">{cnt('sumber lokal')} akar sistem bendung lokal</Chip>}<Chip lvl="good">{cnt('suplesi')} saluran suplesi</Chip>
         </div>
         <div className="tbl-wrap">
           <table>

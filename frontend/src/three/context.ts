@@ -39,10 +39,13 @@ export interface Layout3D {
   plot: Record<number, Pt>;
   inflow: Record<number, Pt>;
   feeder: Record<number, { x: number; gz: number; D: CanalDims }>;
-  cseg: { a: P; b: P; out: number; T: number }[];
+  /** Ruas lurus tiap saluran (`i`) dengan setengah lebar sampai kaki tanggulnya: terlebar, sisi jalan (−n), sisi lain (+n). */
+  cseg: { a: P; b: P; out: number; outL?: number; outR?: number; T: number; D: CanalDims; i?: number }[];
   streams: P[][];
   situ?: number;
   lake?: Pt;
+  /** Pohon di kaki luar tanggul Situ Bagendit (ditanam bersama pohon lain di buildTrees). */
+  lakeTrees?: { x: number; y: number; z: number; s: number; ry: number; rz?: number; palm: boolean }[];
   roads: { r1: P[]; rw: P[]; re: P[] };
 }
 
@@ -78,13 +81,32 @@ export interface SceneState {
   glows: THREE.Sprite[]; lampLights: THREE.PointLight[]; clouds: THREE.Sprite[];
   plotNight: { value: number };
   cells: THREE.Group; plots: THREE.InstancedMesh;
+  /** Lapisan rumpun padi di atas tiap petak (bawah ke atas), berwarna sama dengan petaknya. */
+  plotShells?: THREE.InstancedMesh[];
+  /**
+   * Air bangunan sadap tersier sampai ke petak, per bagian (instanced): matriks tiap instans dan, per sadap (urutan
+   * sama dengan `m`), instans miliknya; kering bila ruasnya tak berdebit.
+   */
+  offtakes?: { parts: { mesh: THREE.InstancedMesh; base: THREE.Matrix4[]; idx: number[][] }[]; m: number[]; on: boolean[] };
+  /** Riak air masuk di muka pengambilan tiap sadap, per saluran: grup yang mengikuti muka air saluran `i`. */
+  offInflow?: { g: THREE.Group; i: number }[];
+  /** Air masuk Situ Bagendit tiap frame: air di saluran inlet, terjunan, buih, dan riak mengikuti saluran. */
+  lakeTick?: () => void;
+  /** Buih keluaran di hilir tiap pintu saluran: mengikuti muka air saluran `i`, bukaan pintu `id`, dan debit. */
+  gateFlow: { m: THREE.Mesh; mat: THREE.MeshStandardMaterial; i: number; id: string }[];
   riverUp: THREE.Mesh;
   weirJets: THREE.MeshStandardMaterial[];
   foamMat2: THREE.MeshStandardMaterial;
   inJet?: THREE.MeshStandardMaterial; klJet?: THREE.MeshStandardMaterial;
-  rain: THREE.Points<THREE.BufferGeometry, THREE.PointsMaterial>;
+  /** Samakan air peralihan kantong lumpur ke SI Copong dengan tinggi dan warna air saluran saat ini. */
+  klTrans?: (canalY: number, canalCol: THREE.Color) => void;
+  /** Arus masuk di muka intake (sisi sungai): garis arus, cekungan muka air, air dan buih di lorong tiap pintu. */
+  intakeFlow?: {
+    g: THREE.Group; tex: THREE.Texture; streak: THREE.MeshStandardMaterial; dip: THREE.MeshBasicMaterial; speed: number;
+    pass: THREE.Mesh[]; pf: THREE.Mesh[]; foam: THREE.MeshStandardMaterial;
+  };
   selRing: THREE.Mesh; selScale: number;
-  pondY?: number; riverSpeed?: number; rainLevel?: number; shSize?: number;
+  pondY?: number; shSize?: number;
   w: number; h: number;
   pend: number[][];
   postHouse?: { x: number; z: number };
@@ -95,7 +117,7 @@ export interface SceneState {
 }
 
 export const S = {
-  ready: false, canal: {}, gates: {}, sensors: {}, labels: [], tags: {}, pickables: [], plotOf: [], plotVary: [], weir: [], mouths: [],
+  ready: false, canal: {}, gates: {}, gateFlow: [], sensors: {}, labels: [], tags: {}, pickables: [], plotOf: [], plotVary: [], weir: [], mouths: [],
   tex: {}, M: {}, G: {}, glows: [], lampLights: [], clouds: [], pend: [], villages: [], paused: false,
   layers: { st: true, gt: true, cells: true }, w: 1, h: 1,
 } as unknown as SceneState;

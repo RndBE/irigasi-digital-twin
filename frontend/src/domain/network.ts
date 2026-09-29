@@ -9,7 +9,32 @@ import type { Group, Line, NetworkData, Pt, Ruas, Source } from './types';
  * dengan efisiensi saluran pembawa 0,9. Ruas di luar pohon SI Copong ikut bila berakar di bendung lokal atau
  * menjadi saluran suplesi.
  */
-export const DATA = raw as unknown as NetworkData;
+/**
+ * Bendung lokal yang dikeluarkan dari twin: Cipacing (SS Pasir Laja), Genteng Cipacing, dan Pangkalan. Ketiganya
+ * sistem sendiri di luar layanan Bendung Copong. Ruasnya, bangunan yang hanya melayani ruas itu, dan catatan
+ * perbaikan topologinya dibuang saat data dimuat, dan indeks ruas lain dipetakan ulang, jadi simulasi, pintu,
+ * stasiun, halaman data, dan adegan 3D tidak melihatnya lagi. Hapus namanya dari daftar untuk memunculkannya lagi.
+ * API backend memakai daftar yang sama (backend/src/index.js).
+ */
+export const DROP_SRC = ['Bendung Cipacing', 'Bendung Genteng Cipacing', 'BD. PANGKALAN'];
+function prune(d: NetworkData): NetworkData {
+  const ru = d.ruas, kids: number[][] = ru.map(() => []), drop = new Uint8Array(ru.length);
+  ru.forEach((r, i) => { if (r.p >= 0) kids[r.p].push(i); });
+  const walk = (i: number) => { drop[i] = 1; kids[i].forEach(walk); };
+  ru.forEach((r, i) => { if (r.p < 0 && r.src && r.into == null && DROP_SRC.includes(r.src)) walk(i); });
+  const idx = new Int32Array(ru.length).fill(-1); let n = 0;
+  ru.forEach((_, i) => { if (!drop[i]) idx[i] = n++; });
+  const gone = new Set(ru.filter((_, i) => drop[i]).map(r => r.k));
+  const ruas = ru.filter((_, i) => !drop[i]).map(r => ({ ...r, p: r.p >= 0 ? idx[r.p] : r.p, into: r.into != null ? idx[r.into] : r.into }));
+  // a structure goes with the dropped ruas when every ruas starting at it is dropped, and the weirs themselves go
+  const keepB = d.bmeta.map(([, ids], k) => !(ids.length && ids.every(i => drop[i])) && !DROP_SRC.includes(d.bangunan[k][2]));
+  return {
+    ...d, ruas, fixes: d.fixes.filter(f => !gone.has(f.k)),
+    bangunan: d.bangunan.filter((_, k) => keepB[k]),
+    bmeta: d.bmeta.filter((_, k) => keepB[k]).map(([t, ids]) => [t, ids.filter(i => !drop[i]).map(i => idx[i])] as [string, number[]]),
+  };
+}
+export const DATA = prune(raw as unknown as NetworkData);
 export const B = DATA.bendung;
 export const R: Ruas[] = DATA.ruas;
 export const N = R.length;

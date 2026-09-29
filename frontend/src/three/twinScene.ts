@@ -1,10 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { clamp, reduceMotion } from '../lib/format';
-import { jitter, rnd } from '../lib/random';
 import { R, ROOT, byName } from '../domain/network';
 import type { Layers, OpenMap, SceneView, Sel, Snapshot } from '../domain/types';
-import { C, LIGHT, S, T3, VIEWS, isDark, riverX, type SceneCallbacks } from './context';
+import { C, LIGHT, LV, S, T3, VIEWS, isDark, riverX, type SceneCallbacks } from './context';
 import { flushStatic, makeGeos } from './geometry';
 import { makeTextures } from './textures';
 import { makeMaterials, makeSky } from './materials';
@@ -12,7 +11,7 @@ import { layout3d, lineMid } from './layout';
 import { ogInit } from './occupancy';
 import { buildGround } from './terrain';
 import { buildRiver } from './river';
-import { buildWeir } from './weir';
+import { buildKlTransition, buildWeir, tickWeirSheets } from './weir';
 import { buildCanals, buildGates, buildLake, buildLocal, buildPlots } from './canals';
 import { buildSensors } from './sensors';
 import { buildRoads } from './roads';
@@ -20,6 +19,7 @@ import { buildFields, buildVillages } from './villages';
 import { buildBackdrop, buildTrees } from './vegetation';
 import { buildLabels, placeLabels } from './labels';
 import { markSelection, selPos, syncScene, updateTags } from './sync';
+import { buildRain, setWeatherTheme, tickWeather } from './weather';
 
 /**
  * Diorama 3D realistis D.I. Leuwigoong.
@@ -60,6 +60,7 @@ function applySceneTheme() {
   S.glows.forEach(g => { g.visible = !!n; });
   S.lampLights.forEach(l => { l.intensity = n * 1.4 * LIGHT; });
   S.clouds.forEach(c => { c.material.color.copy(C(n ? 0x77708a : 0xffffff)); c.material.opacity = n ? 0.45 : 0.8; });
+  setWeatherTheme(!!n);
 }
 
 function buildWorld() {
@@ -68,6 +69,7 @@ function buildWorld() {
   buildRiver();
   buildWeir();
   buildCanals();
+  buildKlTransition();
   buildPlots();
   buildLocal();
   buildLake();
@@ -79,11 +81,7 @@ function buildWorld() {
   buildTrees();
   buildBackdrop();
   flushStatic();
-  const RN = 2600, rg = new THREE.BufferGeometry(), rpos = new Float32Array(RN * 3);
-  for (let k = 0; k < RN; k++) { rpos[k * 3] = jitter(70); rpos[k * 3 + 1] = rnd() * 40; rpos[k * 3 + 2] = jitter(70); }
-  rg.setAttribute('position', new THREE.BufferAttribute(rpos, 3));
-  S.rain = new THREE.Points(rg, new THREE.PointsMaterial({ color: 0xb8c6d0, size: 0.14, transparent: true, opacity: 0, depthWrite: false }));
-  S.rain.frustumCulled = false; S.scene.add(S.rain);
+  buildRain();
   S.selRing = new THREE.Mesh(new THREE.RingGeometry(1.72, 1.95, 48), new THREE.MeshBasicMaterial({ color: 0x19c3d0, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
   S.selRing.rotation.x = -Math.PI / 2; S.selRing.position.y = 0.6; S.selRing.renderOrder = 5; S.scene.add(S.selRing); S.selScale = 1;
   buildLabels();
@@ -127,21 +125,41 @@ function frame(now: number) {
   const mv = reduceMotion ? 0.25 : 1;
   for (const k in S.canal) { const c = S.canal[k]; c.tex.offset.y -= c.speed * dt * mv; c.mesh.position.y += (c.level - c.mesh.position.y) * Math.min(1, dt * 2); }
   S.mouths.forEach(o => { const c = S.canal[o.p]; if (c) o.m.position.y = c.mesh.position.y; });
+  if (S.klTrans) { const c = S.canal[ROOT]; S.klTrans(c.mesh.position.y, c.mat.color); }
   if (S.riverUp && S.pondY != null) S.riverUp.position.y += (S.pondY - S.riverUp.position.y) * Math.min(1, dt * 1.5);
+  if (S.intakeFlow) {
+    const f = S.intakeFlow; f.g.position.y = S.riverUp.position.y; f.tex.offset.y = (f.tex.offset.y - f.speed * dt * mv) % 1;
+    // the passages are open to the pond up to the leaf, a hair under the river surface where the two meet
+    const wl = LV.pond + S.riverUp.position.y;
+    f.pass.forEach(m => { m.position.y = wl - 0.003; }); f.pf.forEach(m => { m.position.y = wl + 0.002; });
+  }
   S.tex.wn.offset.y -= dt * 0.05 * mv; S.tex.wn.offset.x += dt * 0.02 * mv;
-  S.tex.wnRiver.offset.y -= (S.riverSpeed || 0.5) * dt * 0.12 * mv;
-  S.tex.foam.offset.y -= dt * 0.8 * mv; S.foamMat2.map!.offset.y -= dt * 0.35 * mv;
+  // offtake chutes: texture v falls down the chute, so a growing offset carries the flow pattern downhill
+  if (S.tex.chute) S.tex.chute.offset.y = (S.tex.chute.offset.y + dt * 1.1 * mv) % 1;
+  // offtake box, basin, quarter ditch and inlets run the same way; the rings at the inlets spread into the paddy
+  if (S.tex.offFlow) S.tex.offFlow.offset.y = (S.tex.offFlow.offset.y + dt * 0.45 * mv) % 1;
+  if (S.tex.ring) S.tex.ring.offset.y = (S.tex.ring.offset.y - dt * 0.22 * mv) % 1;
+  // at the offtake intakes the rings run the other way, into the mouth, on the canal surface
+  if (S.tex.ringIn) S.tex.ringIn.offset.y = (S.tex.ringIn.offset.y + dt * 0.3 * mv) % 1;
+  S.offInflow?.forEach(o => { const c = S.canal[o.i]; if (c) o.g.position.y = c.mesh.position.y; });
+  S.lakeTick?.();
+  // white water under the canal gates: on the canal surface, as strong as the opening and the flow allow
+  if (S.tex.gateFoam) S.tex.gateFoam.offset.y = (S.tex.gateFoam.offset.y - dt * 0.5 * mv) % 1;
+  S.gateFlow.forEach(f => {
+    const c = S.canal[f.i], g = S.gates[f.id]; if (!c || !g) return;
+    f.mat.opacity = Math.min(0.75, g.cur * 2.2) * Math.min(1, Math.max(0, (c.speed - 0.08) / 1.2));
+    f.m.visible = f.mat.opacity > 0.01; f.m.position.y = c.mesh.position.y + 0.005;
+  });
   for (const id in S.gates) { const g = S.gates[id]; g.cur += (g.target - g.cur) * Math.min(1, dt * 2.5); g.parts.forEach(p => { p.m.position.y = p.y0 + p.lift * g.cur; }); }
   S.weir.forEach(g => {
     g.cur += (g.target - g.cur) * Math.min(1, dt * 1.2); g.leaf.position.y = g.base + g.cur * g.lift;
     if (g.cab) { const top = g.leaf.position.y + (g.hh || 0.36), len = Math.max(0.05, 1.95 - top); g.cab.forEach(c => { c.scale.y = len; c.position.y = top + len / 2; }); }
   });
+  tickWeirSheets(dt, mv);
   for (const id in S.sensors) { const m = S.sensors[id]; if (m.alarm) { const p = (clockT * 0.8 + m.x * 0.01) % 1; m.ring.scale.setScalar(1 + p * 2.2); m.ring.material.opacity = 0.7 * (1 - p); } else m.ring.material.opacity = 0; }
   const sp = 1 + 0.08 * Math.sin(clockT * 3.2); S.selRing.scale.set(S.selScale * sp, S.selScale * sp, 1);
-  const rl = S.rainLevel || 0, tgt = S.controls.target;
-  S.rain.material.opacity = rl > 0.02 ? 0.25 + rl * 0.5 : 0;
-  if (rl > 0.02) { S.rain.position.set(tgt.x, 0, tgt.z); if (!reduceMotion) { const a = S.rain.geometry.attributes.position, arr = a.array; for (let i = 1; i < arr.length; i += 3) { arr[i] -= dt * 30; if (arr[i] < 0) arr[i] += 40; } a.needsUpdate = true; } }
-  S.hemi.intensity = (S.hemiI || 0.25) * (1 - rl * 0.3) * LIGHT; S.sun.intensity = (S.sunI || 1.6) * (1 - rl * 0.45) * LIGHT;
+  const tgt = S.controls.target;
+  tickWeather(dt, clockT);
   if (tween) {
     tween.k = Math.min(1, tween.k + dt / 0.9);
     const e = tween.k < 0.5 ? 2 * tween.k * tween.k : 1 - Math.pow(-2 * tween.k + 2, 2) / 2;
@@ -150,6 +168,8 @@ function frame(now: number) {
   }
   S.controls.update();
   const dist = S.camera.position.distanceTo(tgt), size = clamp(dist * 0.75, 22, 300);
+  // rice tufts only up close: from afar they would shimmer and cost fill for nothing
+  if (S.plotShells && S.plotShells[0].visible !== dist < 40) S.plotShells.forEach(m => { m.visible = dist < 40; });
   S.sun.position.copy(tgt).addScaledVector(S.sunDir, 450); S.sun.target.position.copy(tgt); S.sun.target.updateMatrixWorld();
   if (Math.abs(size - (S.shSize || 0)) > (S.shSize || 1) * 0.08) { const c = S.sun.shadow.camera; c.left = -size; c.right = size; c.top = size; c.bottom = -size; c.updateProjectionMatrix(); S.shSize = size; }
   const nn = clamp(dist * 0.006, 0.2, 3);

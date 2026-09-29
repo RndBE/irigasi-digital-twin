@@ -1,15 +1,15 @@
 import * as THREE from 'three';
-import { lerp } from '../lib/format';
+import { lerp, smooth } from '../lib/format';
 import { R, ROOT } from '../domain/network';
 import { GMAP } from '../domain/gates';
 import { sim } from '../domain/state';
 import type { Sel } from '../domain/types';
-import { LV, S, T3, WEIR_HW, riverHW, riverX } from './context';
+import { C, LV, S, T3, WEIR_HW, riverHW, riverX } from './context';
 import { M4, addStatic, bar, bld, boxG, cylG, mergeGeos, quadMesh, railing, ribbon, type GeoPart } from './geometry';
 import { occRect } from './occupancy';
 import { car, lampPost } from './props';
 import { buildRiprap } from './river';
-import { textTex } from './textures';
+import { drawTex, textTex } from './textures';
 
 /**
  * Kompleks Bendung Copong: bendung gerak dengan 3 pintu banjir 12,5 × 3,5 m dan pintu penguras 5 × 8 m, intake
@@ -38,9 +38,184 @@ function gateLeaf(W: number, H: number, D: number) {
   for (const k of ['s', 'b', 'd', 'y'] as const) if (P[k].length) { const m = new THREE.Mesh(mergeGeos(P[k]), mats[k]); m.castShadow = true; m.receiveShadow = true; g.add(m); }
   return g;
 }
+// intake leaf, 0.68 × 0.3 unit (3 m bay plus the seal overlap): skin plate on the wall side, three girders with
+// flanges and vertical stiffeners on the open face, end posts with guide rollers, a rubber bottom seal and a yoke
+// for the spindle; origin at the centre of the skin, open face = +z. The merged parts are shared by every leaf.
+let intakeLeafGeo: { g: THREE.BufferGeometry; k: 's' | 'b' | 'd' | 'y' }[] | null = null;
+function intakeLeaf() {
+  if (!intakeLeafGeo) {
+    const W = 0.68, H = 0.3, P: Record<'s' | 'b' | 'd' | 'y', GeoPart[]> = { s: [], b: [], d: [], y: [] };
+    const add = (k: 's' | 'b' | 'd' | 'y', w: number, h: number, d: number, x: number, y: number, z: number, rz = 0) => P[k].push({ g: rz ? cylG(1, 1, 12) : S.G.box, m: M4(x, y, z, 0, 0, rz, w, h, d) });
+    add('s', W, H, 0.012, 0, 0, 0);
+    for (const y of [-0.105, 0, 0.105]) { add('b', W - 0.06, 0.02, 0.03, 0, y, 0.021); add('b', W - 0.06, 0.034, 0.006, 0, y, 0.039); }
+    for (const x of [-0.17, 0, 0.17]) add('b', 0.01, H - 0.02, 0.026, x, 0, 0.019);
+    for (const sx of [-1, 1]) {
+      add('s', 0.03, H, 0.046, sx * (W / 2 - 0.015), 0, 0.017);
+      for (const f of [-0.3, 0.3]) add('d', 0.014, 0.012, 0.014, sx * (W / 2 + 0.004), f * H, 0.03, Math.PI / 2);
+    }
+    add('d', W - 0.02, 0.012, 0.024, 0, -H / 2 - 0.004, 0.006);
+    add('y', 0.08, 0.035, 0.05, 0, H / 2 + 0.017, 0.014);
+    intakeLeafGeo = (['s', 'b', 'd', 'y'] as const).map(k => ({ g: mergeGeos(P[k]), k }));
+  }
+  const M = S.M, mats = { s: M.steel, b: M.steel, d: M.dark, y: M.yellow }, g = new THREE.Group();
+  intakeLeafGeo.forEach(({ g: geo, k }) => { const m = new THREE.Mesh(geo, mats[k]); m.castShadow = true; m.receiveShadow = true; g.add(m); });
+  return g;
+}
+
+// opening scale board of an intake gate, 0.07 × 0.28 unit: 0 cm 0.02 above the bottom edge, 115 cm 0.24 higher
+function scaleTex() {
+  return drawTex(128, 512, (g, W, H) => {
+    const y0 = H * (1 - 0.02 / 0.28), pc = H * (0.24 / 0.28) / 115;
+    g.fillStyle = '#f4f4f0'; g.fillRect(0, 0, W, H); g.strokeStyle = '#1f3a5a'; g.lineWidth = 6; g.strokeRect(3, 3, W - 6, H - 6);
+    g.fillStyle = '#1b1b1b'; g.font = '700 30px "Plus Jakarta Sans", Arial, sans-serif'; g.textAlign = 'right'; g.textBaseline = 'middle';
+    for (let cm = 0; cm <= 115; cm += 5) {
+      const y = y0 - cm * pc, major = cm % 20 === 0 || cm === 115;
+      g.fillRect(10, y - (major ? 2 : 1), major ? 44 : cm % 10 ? 18 : 30, major ? 4 : 2);
+      if (major) g.fillText(String(cm), W - 12, y);
+    }
+  });
+}
+
+// water drawn into the open intake bays from the river side: flow lines on the pond surface curving in from upstream
+// and converging on each opening, moving faster as they narrow, and a darker drawdown right at the leaf. The gap
+// under the leaf is below the water, so this is what shows from the river that a gate is passing water.
+function intakeInflow(ix: number, bayZ: number[], pass: THREE.Mesh[], pf: THREE.Mesh[], foam: THREE.MeshStandardMaterial) {
+  // local generator: the shared random stream must not shift, or every procedural texture after this would change
+  let seed = 0x5bd1e995;
+  const r = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const tex = drawTex(128, 256, (g, W, H) => {
+    g.clearRect(0, 0, W, H);
+    for (let i = 0; i < 70; i++) {
+      const x = 4 + r() * (W - 8), y = r() * H, len = 18 + r() * 54, wd = 1 + r() * 1.6, a = 0.35 + r() * 0.5;
+      // drawn twice so streaks crossing the bottom edge wrap to the top and the texture tiles along the flow
+      for (const oy of [y, y - H]) {
+        const gr = g.createLinearGradient(0, oy, 0, oy + len);
+        gr.addColorStop(0, 'rgba(255,255,255,0)'); gr.addColorStop(0.5, `rgba(255,255,255,${a})`); gr.addColorStop(1, 'rgba(255,255,255,0)');
+        g.fillStyle = gr; g.fillRect(x, oy, wd, len);
+      }
+    }
+  });
+  // funnel from the channel along the divide wall (t = 0) to the leaf face (t = 1): u runs 0–1 across so the lines
+  // converge, and v grows with the width so the pattern speeds up where the funnel narrows
+  const X0 = ix - 1.5, X1 = ix - 0.1, Y = LV.pond + 0.012, NU = 8, NV = 16;
+  const funnel = (t0: number, alpha: (u: number, t: number) => number) => {
+    const pos: number[] = [], nrm: number[] = [], uv: number[] = [], col: number[] = [], idx: number[] = [];
+    bayZ.forEach(zb => {
+      const base = pos.length / 3; let v = 0, px = 0, pz = 0;
+      for (let j = 0; j <= NV; j++) {
+        const f = j / NV, t = lerp(t0, 1, f), x = lerp(X0, X1, t), c = zb - 0.7 * (1 - t) ** 2, hw = 0.3 + 0.5 * (1 - t) ** 1.4;
+        if (j) v += Math.hypot(x - px, c - pz) * hw / 0.8 / 0.9;
+        px = x; pz = c;
+        for (let i = 0; i <= NU; i++) { const u = i / NU; pos.push(x, Y, c + (u - 0.5) * 2 * hw); nrm.push(0, 1, 0); uv.push(u, v); col.push(1, 1, 1, alpha(u, f)); }
+      }
+      for (let j = 0; j < NV; j++) for (let i = 0; i < NU; i++) { const a = base + j * (NU + 1) + i, b = a + 1, c = a + NU + 1, d = c + 1; idx.push(a, b, c, b, d, c); }
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 4)); geo.setIndex(idx);
+    return geo;
+  };
+  const side = (u: number, p: number) => Math.pow(Math.sin(Math.PI * u), p);
+  const streak = new THREE.MeshStandardMaterial({ color: 0xffffff, map: tex, transparent: true, opacity: 0, depthWrite: false, roughness: 0.6, vertexColors: true });
+  const dip = new THREE.MeshBasicMaterial({ color: C(0x1c1810), transparent: true, opacity: 0, depthWrite: false, vertexColors: true });
+  const g = new THREE.Group();
+  const md = new THREE.Mesh(funnel(0.72, (u, f) => side(u, 0.8) * smooth(0, 1, f) ** 1.5), dip); md.renderOrder = 3;
+  const ms = new THREE.Mesh(funnel(0, (u, f) => side(u, 0.8) * smooth(0, 0.35, f)), streak); ms.renderOrder = 4; ms.receiveShadow = true;
+  g.add(md, ms); S.scene.add(g);
+  S.intakeFlow = { g, tex, streak, dip, speed: 0, pass, pf, foam };
+}
+
+// Water under a flood gate: a sheet that shoots out under the leaf at the contracted depth of the opening, runs over
+// the crest, thins as it speeds down the glacis and dives under the tailwater in the stilling basin. Once the leaf
+// is lifted clear of the pond the water no longer shoots out under it: the pond surface runs on under the leaf and
+// draws down smoothly over the crest instead. The sheet starts in the colour of the pond and turns to the paler,
+// aerated colour as it speeds up. White water at the gate lip and the churn of the hydraulic jump on the tailwater
+// share one foam material per bay, whose opacity the scene sync sets from the gate discharge (S.weirJets). The
+// sheet follows the leaf and the pond every frame (tickWeirSheets); the piers either side bound it, so it spans
+// the bay wall to wall.
+const SHEET = { hw: 1.24, crestEnd: 0.6, glacis: 1.4, drop: 0.94 };
+// fast water colour (linear) and the base of the streak map, by which the pond colour is divided at the lip
+const SHEET_COL = C(0x93a39a), STREAK_BASE = C(0xc4cccc);
+const weirSheets: { geo: THREE.BufferGeometry; mesh: THREE.Mesh; foam: THREE.MeshStandardMaterial; zs: number[]; lip0: number; lipA: number[]; k: number }[] = [];
+let sheetTex: THREE.Texture | null = null;
+const sheetFloor = (dz: number) => dz <= SHEET.crestEnd ? LV.crest : LV.crest - Math.min(1, (dz - SHEET.crestEnd) / SHEET.glacis) * SHEET.drop;
+const sheetGlide = (dz: number) => clamp01((dz - SHEET.crestEnd) / SHEET.glacis);
+const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+function weirSheet(x: number, zw: number) {
+  const M = S.M, e = SHEET.crestEnd;
+  if (!sheetTex) { sheetTex = S.tex.streak.clone(); sheetTex.needsUpdate = true; }
+  // stations downstream of the gate axis: under the leaf, over the crest, down the glacis, under the tailwater
+  // stations from the drawdown upstream (the pond surface bending down into the opening) to under the tailwater
+  const up = [-1.2, -0.95, -0.72, -0.52, -0.35, -0.2], dn = [-0.06, 0.04, 0.14, 0.25, 0.36, 0.48, e, e + 0.15, e + 0.32, e + 0.5, e + 0.68, e + 0.86, e + 1.05];
+  const zs = [...up, ...dn];
+  const strip = (dzs: number[], y0: number, alpha: ((dz: number) => number) | null) => {
+    const pos: number[] = [], nrm: number[] = [], uv: number[] = [], col: number[] = [], idx: number[] = [];
+    let v = 0;
+    dzs.forEach((dz, k) => {
+      if (k) v += Math.hypot(dz - dzs[k - 1], sheetFloor(dz) - sheetFloor(dzs[k - 1])) / 0.7;
+      for (const s of [-1, 1]) { pos.push(x + s * SHEET.hw, y0, zw + dz); nrm.push(0, 1, 0); uv.push((s + 1) / 2 * 4.5, v); if (alpha) col.push(1, 1, 1, alpha(dz)); }
+      if (k) { const b = (k - 1) * 2; idx.push(b, b + 2, b + 1, b + 1, b + 2, b + 3); }
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); if (alpha) g.setAttribute('color', new THREE.Float32BufferAttribute(col, 4)); g.setIndex(idx);
+    return g;
+  };
+  const geo = strip(zs, LV.crest, () => 1);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: sheetTex, normalMap: S.tex.wn, normalScale: new THREE.Vector2(0.5, 0.5), roughness: 0.14, envMapIntensity: 0.8, transparent: true, vertexColors: true }));
+  mesh.renderOrder = 1; mesh.visible = false; S.scene.add(mesh);
+  // foam: white water off the lip thinning over the crest, then the jump where the sheet meets the tailwater
+  const foam = M.jet.clone(); foam.vertexColors = true; foam.opacity = 0;
+  const lipZ = dn.filter(dz => dz <= e + 0.16), lipA = lipZ.map(dz => dz < 0.2 ? 0.95 : 0.95 - 0.7 * clamp01((dz - 0.2) / 0.6));
+  const lip = new THREE.Mesh(strip(lipZ, LV.crest, dz => lipA[lipZ.indexOf(dz)]), foam);
+  lip.renderOrder = 2; lip.visible = false; S.scene.add(lip);
+  const jz = [e + 0.5, e + 0.7, e + 0.95, e + 1.3, e + 1.8, e + 2.4], jump = strip(jz, LV.down + 0.018, dz => { const t = (dz - e - 0.5) / 1.9; return t < 0.12 ? t / 0.12 : Math.max(0, 1 - (t - 0.12) / 0.88) ** 1.4; });
+  const jm = new THREE.Mesh(jump, foam); jm.renderOrder = 3; S.scene.add(jm);
+  weirSheets.push({ geo, mesh, foam, zs, lip0: up.length, lipA, k: weirSheets.length });
+  mesh.userData.lip = lip;
+  return foam;
+}
+/** Bentuk ulang lembar air di bawah pintu banjir dari tinggi daun pintu dan muka air kolam, dan geser teksturnya. */
+export function tickWeirSheets(dt: number, mv: number) {
+  if (!sheetTex) return;
+  const pond = LV.pond + (S.riverUp ? S.riverUp.position.y : 0), head = pond - LV.crest;
+  let run = 0;
+  weirSheets.forEach(sh => {
+    const g = S.weir[sh.k], a = g ? g.cur * g.lift : 0, lip = sh.mesh.userData.lip as THREE.Mesh;
+    const on = a > 0.003 && head > 0.01 && sh.foam.opacity > 0;
+    sh.mesh.visible = on; lip.visible = on; if (!on) return;
+    // contracted jet under the leaf, never deeper than two thirds of the head over the crest, thinning downslope.
+    // Upstream the pond surface bends down into the opening and meets the leaf lip where the leaf dips into the
+    // water, so there is no step between the pond and the jet to see through. From the lip the water eases down
+    // to the jet: within about one and a half openings under a leaf in the water (the vena contracta), over the
+    // whole crest once the leaf is clear of the pond
+    const free = smooth(0.8, 1.15, a / head), t0 = Math.max(0.012, Math.min(0.61 * a, 0.66 * head));
+    const top = pond - 0.01, atLip = Math.min(top, LV.crest + a - 0.004), z0 = sh.zs[sh.lip0];
+    const ease = lerp(Math.min(0.45, Math.max(0.1, 1.5 * a)), SHEET.crestEnd, free) - z0, tint = lerp(0.2, 0.7, free);
+    const lg = lip.geometry as THREE.BufferGeometry, p = sh.geo.attributes.position, col = sh.geo.attributes.color, lp = lg.attributes.position, lc = lg.attributes.color;
+    const rc = S.M.river.color, ro = S.M.river.opacity;
+    for (let k = 0; k < sh.zs.length; k++) {
+      const dz = sh.zs[k], t = clamp01((dz + 1.2) / 1.14);
+      const y = k < sh.lip0 ? top + (atLip - top) * t * t : atLip + (sheetFloor(dz) + t0 * (1 - 0.45 * sheetGlide(dz)) - atLip) * smooth(z0, z0 + ease, dz);
+      // pond colour at the lip (divided by the streak map it is multiplied with), aerated colour downstream
+      const m = smooth(z0, z0 + tint, dz);
+      for (const i of [k * 2, k * 2 + 1]) {
+        p.setY(i, y);
+        col.setXYZW(i, lerp(Math.min(1, rc.r / STREAK_BASE.r), SHEET_COL.r, m), lerp(Math.min(1, rc.g / STREAK_BASE.g), SHEET_COL.g, m), lerp(Math.min(1, rc.b / STREAK_BASE.b), SHEET_COL.b, m), lerp(ro, 0.78, m));
+      }
+      // white water at the lip only while the leaf is in the water
+      const j = k - sh.lip0; if (j >= 0 && j < sh.lipA.length) for (const i of [j * 2, j * 2 + 1]) { lp.setY(i, y + 0.004); lc.setW(i, sh.lipA[j] * (1 - 0.85 * free)); }
+    }
+    p.needsUpdate = col.needsUpdate = lp.needsUpdate = lc.needsUpdate = true;
+    run = Math.max(run, 1.2 + 6 * a);
+  });
+  sheetTex.offset.y = (sheetTex.offset.y - dt * run * mv) % 1;
+}
+
 const plane = (tex: THREE.Texture, sx: number, sy: number, side?: THREE.Side) => { const m = new THREE.Mesh(S.G.plane, new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6, ...(side != null ? { side } : {}) })); m.scale.set(sx, sy, 1); return m; };
 
 export function buildWeir() {
+  weirSheets.length = 0;
   const M = S.M, zw = T3.weirZ, cx = riverX(zw), K = T3.KL, zA = T3.zA, zB = T3.zB, w = bld(0, 0, 0);
   const selW: Sel = { kind: 'station', id: 'AWLR-CPG-02' }, selI: Sel = { kind: 'gate', id: 'g-intake' }, selK: Sel = { kind: 'ruas', id: R[ROOT].k };
   const bays = [-3.75, -0.75, 2.25], deckY = 1.95;
@@ -113,8 +288,8 @@ export function buildWeir() {
   w.box(M.concrete, 0.4, wallH, K.z0 - zA, cx + WEIR_HW + 0.2, wy, (zA + K.z0) / 2);
   const flare = (x0: number, z0: number, x1: number, z1: number) => { const L = Math.hypot(x1 - x0, z1 - z0); w.box(M.concrete, 0.4, wallH, L + 0.2, (x0 + x1) / 2, wy, (z0 + z1) / 2, 0, Math.atan2(x1 - x0, z1 - z0), 0); };
   flare(cx - 5.7, zA, cx - 7.6, zA - 2.6); flare(cx + 5.7, zA, cx + 7.6, zA - 2.6); flare(cx - 5.7, zB, cx - 7.3, zB + 2.4); flare(cx + 5.7, zB, cx + 7.3, zB + 2.4);
-  // jets under the gates, foam in the stilling basin and downstream
-  S.weirJets = bays.map(bx => { const m = M.jet.clone(), j = ribbon([[cx + bx, zw + 0.07, -0.22], [cx + bx, zw + 0.55, -0.5], [cx + bx, zw + 1.35, -0.74]], 2.4, 0, m, 1.5); j.renderOrder = 2; return m; });
+  // water under the flood gates (see weirSheets), the jet of the scouring gate, foam in the basin and downstream
+  S.weirJets = bays.map(bx => weirSheet(cx + bx, zw));
   { const m = M.jet.clone(), j = ribbon([[cx + 4.5, zw + 0.1, -0.73], [cx + 4.5, zw + 2.4, -0.735]], 0.95, 0, m, 1.2); j.renderOrder = 2; S.weirJets.push(m); }
   const foamA = ribbon([[cx, zw + 0.8], [cx, zw + 6.2]], 10.9, LV.down + 0.02, M.foam, 3); foamA.renderOrder = 3;
   S.foamMat2 = M.foam.clone(); S.foamMat2.map = S.tex.foam.clone(); S.foamMat2.map.needsUpdate = true;
@@ -130,14 +305,22 @@ export function buildWeir() {
   const ix = cx + WEIR_HW, zc = (K.z0 + K.z1) / 2, bayZ = [K.z0 + 1.3, K.z0 + 3.5, K.z0 + 5.7], zFace = zw - 2.3, dY = 1.15, topY = deckY + 0.18;
   const cuts = [K.z0, ...bayZ.flatMap(z => [z - 0.3, z + 0.3]), K.z1];
   for (let k = 0; k < cuts.length; k += 2) w.box(M.concrete, 0.45, 1.85, cuts[k + 1] - cuts[k], ix + 0.225, 0.025, (cuts[k] + cuts[k + 1]) / 2);
+  // the river face is dark and wet up to a little above the normal pond, where the water laps
+  for (let k = 0; k < cuts.length; k += 2) w.box(M.concreteDark, 0.004, 1.25, cuts[k + 1] - cuts[k], ix - 0.002, -0.225, (cuts[k] + cuts[k + 1]) / 2);
   // each opening is 3 m wide and 1,15 m high (0,24 unit) under a breast wall. Each bay has a leaf on both faces of
   // the wall, so it reads as a gate from the river and from the trap: the trap leaf hangs on the motor hoist on the
   // deck, the river leaf on a spindle to a handwheel stand on the front strip. Both slide up over the breast wall in
   // steel guides and follow the opening, 100 % = 1,15 m.
-  const ys = 0.17, yl = 0.41, gx2 = ix + 0.49, parts: { m: THREE.Object3D; y0: number; lift: number }[] = [];
+  const ys = 0.17, yl = 0.41, gx2 = ix + 0.49, parts: { m: THREE.Object3D; y0: number; lift: number }[] = [], pass: THREE.Mesh[] = [], pf: THREE.Mesh[] = [];
   S.inJet = M.jet.clone();
+  const scaleMat = new THREE.MeshStandardMaterial({ map: scaleTex(), roughness: 0.6 }), passFoam = M.jet.clone();
   bayZ.forEach((z, k) => {
     w.box(M.concrete, 0.45, ys + 0.9, 0.6, ix + 0.225, (ys - 0.9) / 2, z); w.box(M.concrete, 0.45, 0.95 - yl, 0.6, ix + 0.225, (0.95 + yl) / 2, z);
+    // wet concrete: the river face below the opening, the passage floor and a band on both passage walls
+    w.box(M.concreteDark, 0.004, ys + 0.85, 0.6, ix - 0.002, (ys - 0.85) / 2, z);
+    w.box(M.concreteDark, 0.45, 0.004, 0.6, ix + 0.225, ys + 0.002, z);
+    for (const s of [-1, 1]) w.box(M.concreteDark, 0.45, 0.4 - ys, 0.004, ix + 0.225, (ys + 0.4) / 2, z + s * 0.298);
+    w.box(M.concreteDark, 0.45, 0.004, 0.6, ix + 0.225, yl - 0.002, z);
     for (const s of [-1, 1]) {
       w.box(M.steel, 0.08, 0.95 - ys, 0.05, ix + 0.49, (ys + 0.95) / 2, z + s * 0.355);
       w.box(M.steel, 0.02, 0.95 - ys, 0.09, ix + 0.535, (ys + 0.95) / 2, z + s * 0.355);
@@ -145,27 +328,39 @@ export function buildWeir() {
       w.box(M.steel, 0.02, 1.03 - ys, 0.09, ix - 0.085, (ys + 1.03) / 2, z + s * 0.355);
       w.box(M.gateBlue, 0.08, 0.82, 0.08, gx2, dY + 0.41, z + s * 0.4);
     }
-    w.box(M.steel, 0.1, 0.015, 0.74, ix + 0.49, ys + 0.007, z);
+    w.box(M.galv, 0.1, 0.01, 0.74, ix + 0.47, ys + 0.005, z);
     const pn = plane(textTex('PINTU ' + (k + 1), null, 256, 72), 0.3, 0.085);
     pn.rotation.y = Math.PI / 2; pn.position.set(ix + 0.452, 0.86, z); S.scene.add(pn);
-    ribbon([[ix + 0.01, z], [ix + 0.45, z]], 0.6, 0.3, M.klWater, 1);
+    // water in the passage between the leaves, at the pond level (follows it in the frame loop)
+    pass.push(ribbon([[ix + 0.01, z], [ix + 0.45, z]], 0.6, 0.3, M.klWater, 1));
+    // churned water rushing under the river leaf through the passage, by the intake discharge
+    const f = ribbon([[ix + 0.005, z], [ix + 0.45, z]], 0.56, 0.3, passFoam, 1.0); f.renderOrder = 2; pf.push(f);
     const j = ribbon([[ix + 0.53, z, 0.306], [ix + 1.45, z, 0.305]], 0.64, 0, S.inJet!, 1.0); j.renderOrder = 2;
     // hoist portal above the slot: gearbox, motor, hand wheel for emergency
     w.box(M.gateBlue, 0.14, 0.08, 0.94, gx2, dY + 0.86, z);
     w.box(M.yellow, 0.22, 0.15, 0.26, gx2, dY + 0.975, z);
     w.cyl(M.dark, 0.05, 0.05, 0.2, 10, gx2, dY + 0.97, z + 0.23, Math.PI / 2, 0, 0);
     w.geo(M.yellow, S.G.torus, gx2 - 0.15, dY + 0.97, z - 0.04, 0.72, 0.72, 0.72, 0, Math.PI / 2, 0);
-    const leaf = new THREE.Mesh(S.G.leaf, M.steel); leaf.scale.set(0.68 / 2.46, 0.3 / 0.72, 0.5); leaf.rotation.y = Math.PI / 2; leaf.position.set(gx2, ys + 0.15, z); leaf.castShadow = true; S.scene.add(leaf);
+    const leaf = intakeLeaf(); leaf.rotation.y = Math.PI / 2; leaf.position.set(ix + 0.464, ys + 0.15, z); S.scene.add(leaf);
     const rod = new THREE.Mesh(boxG(0.035, 1.83, 0.035), M.galv); rod.position.set(gx2, ys + 0.3 + 0.915, z); rod.castShadow = true; S.scene.add(rod);
     parts.push({ m: leaf, y0: leaf.position.y, lift: yl - ys }, { m: rod, y0: rod.position.y, lift: yl - ys });
     // river face: sill plate, leaf with its stiffeners facing the river, rising spindle, handwheel stand on the strip
-    w.box(M.steel, 0.1, 0.015, 0.74, ix - 0.04, ys + 0.007, z);
-    const leafR = new THREE.Mesh(S.G.leaf, M.steel); leafR.scale.copy(leaf.scale); leafR.rotation.y = -Math.PI / 2; leafR.position.set(ix - 0.04, ys + 0.15, z); leafR.castShadow = true; S.scene.add(leafR);
+    w.box(M.galv, 0.1, 0.01, 0.74, ix - 0.02, ys + 0.005, z);
+    const leafR = intakeLeaf(); leafR.rotation.y = -Math.PI / 2; leafR.position.set(ix - 0.014, ys + 0.15, z); S.scene.add(leafR);
     const rL = dY + 0.34 - (ys + 0.3), rodR = new THREE.Mesh(boxG(0.03, rL, 0.03), M.galv); rodR.position.set(ix - 0.04, ys + 0.3 + rL / 2, z); rodR.castShadow = true; S.scene.add(rodR);
     w.box(M.gateBlue, 0.1, 0.2, 0.16, ix - 0.04, dY + 0.1, z); w.box(M.yellow, 0.13, 0.06, 0.19, ix - 0.04, dY + 0.23, z);
     w.geo(M.yellow, S.G.torus, ix - 0.04, dY + 0.29, z, 0.62, 0.62, 0.62, Math.PI / 2, 0, 0);
     parts.push({ m: leafR, y0: leafR.position.y, lift: yl - ys }, { m: rodR, y0: rodR.position.y, lift: yl - ys });
+    // opening scale beside the spindle, clear of the handwheel: 0–115 cm at 1:1 with the leaf travel, read off a red
+    // pointer clamped to the top of the rising spindle
+    const s0 = dY + 0.34, sz = z + 0.13;
+    w.box(M.galv, 0.015, 0.32, 0.015, ix - 0.04, dY + 0.16, sz);
+    w.box(M.dark, 0.01, 0.29, 0.08, ix - 0.04, s0 + 0.12, sz);
+    addStatic(scaleMat, S.G.plane, M4(ix - 0.046, s0 + 0.12, sz, 0, -Math.PI / 2, 0, 0.07, 0.28, 1));
+    const ptr = new THREE.Mesh(boxG(0.012, 0.008, 0.175), M.red); ptr.position.set(ix - 0.052, s0, z + 0.0875); S.scene.add(ptr);
+    parts.push({ m: ptr, y0: s0, lift: yl - ys });
   });
+  intakeInflow(ix, bayZ, pass, pf, passFoam);
   w.box(M.gauge, 0.012, 0.6, 0.06, ix + 0.456, 0.33, bayZ[1] + 0.62);
   S.gates['g-intake'] = { parts, cur: sim.open['g-intake'] / 100, target: sim.open['g-intake'] / 100 };
   GMAP['g-intake'].pos3 = [ix + 0.8, zc];
@@ -254,24 +449,9 @@ export function buildWeir() {
   const Lr = T3.lines[ROOT], Dr = Lr.D, tx1 = Lr.sx;
   const tw = (x0: number, z0: number, x1: number, z1: number) => { const L = Math.hypot(x1 - x0, z1 - z0); w.box(M.concrete, 0.25, 0.7, L + 0.25, (x0 + x1) / 2, 0.32, (z0 + z1) / 2, 0, Math.atan2(x1 - x0, z1 - z0), 0); };
   tw(kx1, K.z0 + 0.15, tx1, Lr.z - Dr.hw - 0.12); tw(kx1, K.z1 - 0.15, tx1, Lr.z + Dr.hw + 0.12);
-  // flow texture from under the house to the canal, clipped to the inner faces of the transition walls
-  {
-    const wl = [K.z0 + 0.15, Lr.z - Dr.hw - 0.12], wr = [K.z1 - 0.15, Lr.z + Dr.hw + 0.12], run = tx1 - kx1;
-    const off = (a: number[]) => 0.125 / Math.cos(Math.atan2(Math.abs(a[1] - a[0]), run)) + 0.04;
-    const edge = (x: number, a: number[], sgn: number) => x <= kx1 ? a[0] + sgn * 0.19 : lerp(a[0], a[1], (x - kx1) / run) + sgn * off(a);
-    const pos: number[] = [], uv: number[] = [], idx: number[] = [];
-    [gxp + 0.06, kx1, kx1 + 0.6, kx1 + 1.3, kx1 + 2.0, kx1 + 2.7, tx1 - 0.05].forEach((x, k) => {
-      const zl = edge(x, wl, 1), zr = edge(x, wr, -1);
-      pos.push(x, 0.285, zl, x, 0.285, zr); uv.push(0, x / 1.6, (zr - zl) / 1.6, x / 1.6);
-      if (k) { const a = (k - 1) * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
-    });
-    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setIndex(idx); g.computeVertexNormals();
-    S.klJet = M.jet.clone(); const fm = new THREE.Mesh(g, S.klJet); fm.renderOrder = 2; S.scene.add(fm);
-  }
+  // water down the transition is built with the canals (buildKlTransition), so it can pick up their surface
   for (const [z0, z1] of [[K.z0 + 0.15, Lr.z - Dr.hw - 0.12], [K.z1 - 0.15, Lr.z + Dr.hw + 0.12]]) railing([[kx1 + 0.35, 0.67, z0 + (z1 - z0) * 0.35 / (tx1 - kx1)], [tx1, 0.67, z1]]);
   quadMesh([[kx1, K.z0 + 0.3], [tx1 + 0.2, Lr.z - Dr.hw], [tx1 + 0.2, Lr.z + Dr.hw], [kx1, K.z1 - 0.3]], 0.0, M.concreteDark);
-  const trw = quadMesh([[gxp + 0.04, K.z0 + 0.3], [tx1 + 0.25, Lr.z - Dr.hw + 0.04], [tx1 + 0.25, Lr.z + Dr.hw - 0.04], [gxp + 0.04, K.z1 - 0.3]], 0.27, M.klWater);
-  trw.userData.sel = selK; S.pickables.push(trw);
   w.pick(kx1 - kx0, 1.0, K.z1 - K.z0, (kx0 + kx1) / 2, 0.4, zc, selK);
   occRect(cx - 12, zA - 4, kx1 + 4, zB + 4, 3); occRect(kx1, K.z0 - 1, tx1 + 1, K.z1 + 1, 3);
   // flushing conduit outlet back into the river
@@ -297,4 +477,61 @@ export function buildWeir() {
   }
   office.userData.sel = selW; S.pickables.push(office);
   occRect(hx - 5, hz - 4, hx + 5, hz + 1.8, 3);
+}
+
+/**
+ * Air dari bawah rumah ujung kantong lumpur, menuruni peralihan, masuk SI Copong. Dibangun sesudah saluran supaya
+ * menyambung ke muka airnya: satu permukaan dari muka air kantong lumpur ke muka air dan warna saluran, memakai
+ * tekstur arus saluran itu sendiri (skala dan geseran yang sama) sehingga garis arusnya mengalir terus tanpa
+ * sambungan, dengan buih dari lorong-lorong kantong lumpur yang memudar di sepanjang peralihan.
+ */
+export function buildKlTransition() {
+  const M = S.M, K = T3.KL, kx1 = K.x1, gxp = kx1 - 0.45, Lr = T3.lines[ROOT], Dr = Lr.D, tx1 = Lr.sx, c = S.canal[ROOT];
+  const wl = [K.z0 + 0.15, Lr.z - Dr.hw - 0.12], wr = [K.z1 - 0.15, Lr.z + Dr.hw + 0.12], run = tx1 - kx1;
+  const off = (a: number[]) => 0.125 / Math.cos(Math.atan2(Math.abs(a[1] - a[0]), run));
+  // inner faces of the transition walls (under the house, of the outer piers), moved in by `inset`
+  const edge = (x: number, a: number[], sgn: number, inset: number) => x <= kx1 ? a[0] + sgn * (0.15 + inset) : lerp(a[0], a[1], (x - kx1) / run) + sgn * (off(a) + inset);
+  const tOf = (x: number) => smooth(0, 1, (x - kx1) / run);
+  // the canal's own uv at its first ring: u across by z, v along x at the canal's scale
+  const cp = c.mesh.geometry.attributes.position, cu = c.mesh.geometry.attributes.uv;
+  const z0 = cp.getZ(0), z1 = cp.getZ(1), u0 = cu.getX(0), u1 = cu.getX(1), x0 = cp.getX(0);
+  const uAt = (z: number) => u0 + (z - z0) * (u1 - u0) / (z1 - z0), vAt = (x: number) => (x - x0) / (Dr.w * 2.6);
+  const strip = (xs: number[], zOf: (x: number, a: number[], sgn: number) => number, rgba: boolean, alpha: (t: number) => number) => {
+    const pos: number[] = [], nrm: number[] = [], uv: number[] = [], col: number[] = [], idx: number[] = [];
+    xs.forEach((x, k) => {
+      const zl = zOf(x, wl, 1), zr = zOf(x, wr, -1), a = alpha(tOf(x));
+      pos.push(x, 0.3, zl, x, 0.3, zr); nrm.push(0, 1, 0, 0, 1, 0); uv.push(uAt(zl), vAt(x), uAt(zr), vAt(x));
+      col.push(...(rgba ? [1, 1, 1, a, 1, 1, 1, a] : [1, 1, 1, 1, 1, 1]));
+      if (k) { const b = (k - 1) * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
+    });
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setAttribute('color', new THREE.Float32BufferAttribute(col, rgba ? 4 : 3)); g.setIndex(idx);
+    return g;
+  };
+  // water: reaches into the walls, and ends on the canal water's first ring, taken vertex for vertex
+  const wx = [gxp + 0.04, kx1, kx1 + 0.6, kx1 + 1.3, kx1 + 2.0, kx1 + 2.7, x0];
+  const wg = strip(wx, (x, a, sgn) => x >= x0 ? (sgn > 0 ? Math.min(z0, z1) : Math.max(z0, z1)) : edge(x, a, sgn, -0.02), false, () => 1);
+  const wm = new THREE.Mesh(wg, new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, map: c.tex, normalMap: S.tex.wn, normalScale: new THREE.Vector2(0.35, 0.35), roughness: 0.2, metalness: 0.02, envMapIntensity: 0.55, transparent: true, opacity: 0.93 }));
+  wm.receiveShadow = true; wm.userData.sel = { kind: 'ruas', id: R[ROOT].k }; S.scene.add(wm); S.pickables.push(wm);
+  // churned water out of the bays, fading out before the canal
+  const fx = [gxp + 0.06, kx1, kx1 + 0.6, kx1 + 1.3, kx1 + 2.0, kx1 + 2.7, tx1 - 0.05];
+  const fg = strip(fx, (x, a, sgn) => edge(x, a, sgn, 0.04), true, t => 1 - smooth(0.3, 0.95, t));
+  S.klJet = M.jet.clone(); S.klJet.vertexColors = true;
+  const fm = new THREE.Mesh(fg, S.klJet); fm.renderOrder = 2; S.scene.add(fm);
+  // the trap water's colour, lifted by the flow texture's mean so both ends read as the water they meet
+  const kl = M.klWater.color.clone().multiplyScalar(1.6), cc = new THREE.Color();
+  // the surface is lifted like the canal's (mesh at the canal level, the end ring at y = 0 in the geometry), so
+  // the shared edge transforms exactly the same in both meshes and leaves no hairline crack
+  S.klTrans = (canalY: number, canalCol: THREE.Color) => {
+    const wp = wg.attributes.position, wc = wg.attributes.color, fp = fg.attributes.position;
+    wm.position.y = canalY;
+    for (let k = 0; k < wp.count; k++) {
+      const t = tOf(wp.getX(k)); wp.setY(k, (1 - t) * (0.3 - canalY));
+      cc.copy(kl).lerp(canalCol, t); wc.setXYZ(k, cc.r, cc.g, cc.b);
+    }
+    for (let k = 0; k < fp.count; k++) fp.setY(k, lerp(0.3, canalY, tOf(fp.getX(k))) + 0.012);
+    wp.needsUpdate = true; wc.needsUpdate = true; fp.needsUpdate = true;
+  };
+  S.klTrans(c.mesh.position.y, c.mat.color);
 }

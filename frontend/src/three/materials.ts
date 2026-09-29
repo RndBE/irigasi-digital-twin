@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { C, S } from './context';
+import { patchRiverMaterial } from './weather';
 
 /** Bahan adegan. Warna kompleks intake dan bendung mengikuti peta SimHidro: dinding biru, atap dan pagar kuning. */
 export function makeMaterials() {
@@ -44,6 +45,7 @@ export function makeMaterials() {
   M.foam = std({ color: 0xffffff, map: T.foam, transparent: true, opacity: 0.6, depthWrite: false, roughness: 0.9 });
   M.jet = std({ color: 0xffffff, map: T.foam, transparent: true, opacity: 0.4, depthWrite: false, roughness: 0.6 });
   M.river = std({ color: C(0x6c6749), roughness: 0.12, metalness: 0.05, normalMap: T.wnRiver, normalScale: new THREE.Vector2(0.32, 0.32), envMapIntensity: 0.75, transparent: true, opacity: 0.96 });
+  patchRiverMaterial(M.river);
   M.lake = std({ color: C(0x46685f), roughness: 0.06, metalness: 0.05, normalMap: T.wn, normalScale: new THREE.Vector2(0.3, 0.3), transparent: true, opacity: 0.95 });
   M.pond = wuv(std({ color: C(0x55724c), roughness: 0.1, normalMap: T.wn, normalScale: new THREE.Vector2(0.25, 0.25) }), 3);
   M.klWater = std({ color: C(0x7d7a57), roughness: 0.12, normalMap: T.wn, normalScale: new THREE.Vector2(0.3, 0.3), transparent: true, opacity: 0.96 });

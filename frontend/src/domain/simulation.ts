@@ -98,7 +98,8 @@ export function recommend(env: Env): OpenMap {
 
 function rainAt(t: number) {
   if (sim.scenario === 'kemarau') return 0;
-  if (sim.scenario === 'banjir') return Math.max(0, 17 + 10 * Math.sin(t / 83) + jitter(5));
+  // hujan lebat sampai sangat lebat sepanjang skenario banjir (±8–32 mm/jam), tidak surut ke gerimis
+  if (sim.scenario === 'banjir') return Math.max(0, 20 + 8 * Math.sin(t / 83) + jitter(4));
   const h = wibHour(t), r = 9.5 * Math.exp(-((h - 15.4) ** 2) / (2 * 0.6 * 0.6));
   return r > 0.4 ? Math.max(0, r * (0.8 + rnd() * 0.4)) : 0;
 }
